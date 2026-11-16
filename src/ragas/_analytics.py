@@ -8,6 +8,7 @@ import time
 import typing as t
 import uuid
 from functools import lru_cache, wraps
+from queue import Full, Queue
 from threading import Lock, Thread
 from typing import List
 
@@ -219,6 +220,51 @@ class AnalyticsBatcher:
         logger.debug("AnalyticsBatcher shutdown complete")
 
 
+class _AnalyticsTransport:
+    """Bounded best-effort telemetry transport; never block scoring on DNS."""
+
+    def __init__(self, capacity: int = 128):
+        self._queue: Queue[t.Dict[str, t.Any]] = Queue(maxsize=capacity)
+        self._start_lock = Lock()
+        self._worker: t.Optional[Thread] = None
+
+    def submit(self, payload: t.Dict[str, t.Any]) -> None:
+        try:
+            self._queue.put_nowait(payload)
+        except Full:
+            # A broken telemetry endpoint must not exhaust memory or throttle
+            # evaluation. Drop excess tracking rather than queueing unboundedly.
+            logger.debug("Telemetry queue full; dropping analytics event")
+            return
+
+        with self._start_lock:
+            if self._worker is None or not self._worker.is_alive():
+                self._worker = Thread(
+                    target=self._drain, name="ragas-telemetry", daemon=True
+                )
+                self._worker.start()
+
+    def _drain(self) -> None:
+        while True:
+            payload = self._queue.get()
+            try:
+                requests.post(
+                    USAGE_TRACKING_URL,
+                    json=payload,
+                    timeout=USAGE_REQUESTS_TIMEOUT_SEC,
+                )
+            except Exception as err:
+                if _usage_event_debugging():
+                    logger.info("Tracking Error: %s", err)
+                else:
+                    logger.debug("Tracking Error: %s", err)
+            finally:
+                self._queue.task_done()
+
+
+_analytics_transport = _AnalyticsTransport()
+
+
 @silent
 def track(event_properties: BaseEvent):
     if do_not_track():
@@ -230,7 +276,7 @@ def track(event_properties: BaseEvent):
         logger.info("Tracking Payload: %s", payload)
         return
 
-    requests.post(USAGE_TRACKING_URL, json=payload, timeout=USAGE_REQUESTS_TIMEOUT_SEC)
+    _analytics_transport.submit(payload)
 
 
 class IsCompleteEvent(BaseEvent):
