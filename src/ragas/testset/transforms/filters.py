@@ -62,16 +62,22 @@ class CustomNodeFilter(LLMBasedNodeFilter):
     rubrics: t.Dict[str, str] = field(default_factory=lambda: DEFAULT_RUBRICS)
 
     async def custom_filter(self, node: Node, kg: KnowledgeGraph) -> bool:
+        # Pre-chunked graphs contain CHUNK nodes without a parent document.
+        # SummaryExtractor writes summaries directly onto those chunks.
+        summary = node.properties.get("summary") or ""
         if node.type.name == "CHUNK":
-            parent_nodes = get_parent_nodes(node, kg)
-            if len(parent_nodes) > 0:
-                summary = parent_nodes[0].properties.get("summary", "")
-            else:
-                summary = ""
-        else:
-            summary = node.properties.get("summary", "")
+            parent_summary = next(
+                (
+                    parent.properties["summary"]
+                    for parent in get_parent_nodes(node, kg)
+                    if parent.properties.get("summary")
+                ),
+                None,
+            )
+            if parent_summary:
+                summary = parent_summary
 
-        if summary == "":
+        if not summary:
             logger.warning(
                 f"Node {node.id} does not have a summary. Skipping filtering."
             )
