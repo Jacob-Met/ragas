@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import copy
 import hashlib
 import json
@@ -240,7 +241,7 @@ class PydanticPrompt(BasePrompt, t.Generic[InputModel, OutputModel]):
         # Handle different LLM types with different interfaces
         # 1. LangChain LLMs have agenerate_prompt() for async with specific signature
         # 2. BaseRagasLLM have generate() with n, temperature, stop, callbacks
-        # 3. InstructorLLM has generate()/agenerate() with only prompt and response_model
+        # 3. InstructorLLM supports separate calls with independent cache slots
         if is_langchain_llm(llm):
             # This is a LangChain LLM - use agenerate_prompt() with batch for multiple generations
             langchain_llm = t.cast(BaseLanguageModel, llm)
@@ -252,40 +253,53 @@ class PydanticPrompt(BasePrompt, t.Generic[InputModel, OutputModel]):
                 callbacks=prompt_cb,
             )
         elif isinstance(llm, InstructorBaseRagasLLM):
-            # This is an InstructorLLM - use its generate()/agenerate() method
-            # InstructorLLM.generate()/agenerate() only takes prompt and response_model parameters
+            # Each requested structured generation is a separate Instructor
+            # request; one response was previously returned regardless of n.
             from ragas.llms.base import InstructorLLM
 
-            instructor_llm = t.cast(InstructorLLM, llm)
-            if instructor_llm.is_async:
+            instructor_llm = t.cast(InstructorBaseRagasLLM, llm)
+
+            async def one_generation(index: int) -> BaseModel:
                 if isinstance(llm, InstructorLLM):
-                    result = await llm.agenerate(
+                    # Variant slots are only cache keys; they are not provider
+                    # request parameters. Repeat calls then recover each
+                    # independently without double-charging token usage.
+                    generation_kwargs = {"generation_index": index} if n > 1 else {}
+                    if llm.is_async:
+                        return await llm.agenerate(
+                            prompt=prompt_value.text,
+                            response_model=self.output_model,
+                            callbacks=prompt_cb,
+                            **generation_kwargs,
+                        )
+                    return await asyncio.to_thread(
+                        llm.generate,
                         prompt=prompt_value.text,
                         response_model=self.output_model,
                         callbacks=prompt_cb,
+                        **generation_kwargs,
                     )
-                else:
-                    result = await llm.agenerate(
+                # Custom InstructorBaseRagasLLM subclasses may not support
+                # callback or generation_index kwargs.
+                if t.cast(t.Any, instructor_llm).is_async:
+                    return await instructor_llm.agenerate(
                         prompt=prompt_value.text,
                         response_model=self.output_model,
                     )
-            else:
-                if isinstance(llm, InstructorLLM):
-                    result = llm.generate(
-                        prompt=prompt_value.text,
-                        response_model=self.output_model,
-                        callbacks=prompt_cb,
-                    )
-                else:
-                    result = llm.generate(
-                        prompt=prompt_value.text,
-                        response_model=self.output_model,
-                    )
-            # Wrap the single response in an LLMResult-like structure for consistency
+                return await asyncio.to_thread(
+                    instructor_llm.generate,
+                    prompt=prompt_value.text,
+                    response_model=self.output_model,
+                )
+
+            results = await asyncio.gather(*(one_generation(i) for i in range(n)))
             from langchain_core.outputs import Generation, LLMResult
 
-            generation = Generation(text=result.model_dump_json())
-            resp = LLMResult(generations=[[generation]])
+            resp = LLMResult(
+                generations=[
+                    [Generation(text=result.model_dump_json())] for result in results
+                ]
+            )
         else:
             # This is a standard BaseRagasLLM - use generate()
             ragas_llm = t.cast(BaseRagasLLM, llm)

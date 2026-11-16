@@ -1251,14 +1251,21 @@ class InstructorLLM(InstructorBaseRagasLLM):
         prompt: str,
         response_model: t.Type[InstructorTypeVar],
         callbacks: Callbacks = None,
+        generation_index: int = 0,
     ) -> InstructorTypeVar:
         """Generate a response using the configured LLM.
 
         For async clients, this will run the async method in the appropriate event loop.
+        generation_index isolates cached variants; it is not sent to the provider.
         """
         if self.is_async:
             result = self._run_async_in_current_loop(
-                self.agenerate(prompt, response_model, callbacks=callbacks)
+                self.agenerate(
+                    prompt,
+                    response_model,
+                    callbacks=callbacks,
+                    generation_index=generation_index,
+                )
             )
         else:
             result = self._generate_sync(prompt, response_model, callbacks=callbacks)
@@ -1280,8 +1287,9 @@ class InstructorLLM(InstructorBaseRagasLLM):
         prompt: str,
         response_model: t.Type[InstructorTypeVar],
         callbacks: Callbacks = None,
+        generation_index: int = 0,
     ) -> InstructorTypeVar:
-        """Asynchronously generate a response using the configured LLM."""
+        """Generate asynchronously; generation_index identifies cache slots only."""
         # If client is sync, offload to a thread to avoid blocking the event loop
         if not self.is_async:
             return await asyncio.to_thread(
