@@ -12,6 +12,9 @@ class BleuScore(BaseMetric):
 
     This implementation provides automatic validation and pure async design
     without requiring LLM or embedding components. Uses sacrebleu library.
+    Effective n-gram order is enabled for short responses by default.
+    Set kwargs={"tokenize": "zh"} for Chinese character-level scoring,
+    or pass use_effective_order=False to restore corpus-style behavior.
 
     Usage:
         >>> from ragas.metrics.collections import BleuScore
@@ -71,16 +74,8 @@ class BleuScore(BaseMetric):
         assert isinstance(reference, str), "BleuScore expects a valid reference string"
         assert isinstance(response, str), "BleuScore expects a valid response string"
 
-        reference_sentences = reference.split(". ")
-        response_sentences = response.split(". ")
-
-        reference_formatted = [[ref] for ref in reference_sentences]
-        response_formatted = response_sentences
-
-        score = (
-            corpus_bleu(response_formatted, reference_formatted, **self.kwargs).score
-            / 100
-        )
-
-        assert isinstance(score, float), "Expecting a float"
-        return MetricResult(value=float(score))
+        # This metric evaluates one response/reference pair. Effective order
+        # ensures perfect short or unsegmented CJK matches do not score zero.
+        options = {"use_effective_order": True, **self.kwargs}
+        score = corpus_bleu([response], [[reference]], **options).score / 100
+        return MetricResult(value=min(1.0, max(0.0, score)))
