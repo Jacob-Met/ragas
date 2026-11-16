@@ -5,11 +5,13 @@ import inspect
 import logging
 import threading
 import typing as t
+import uuid
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 
 import instructor
 from langchain_core.language_models import BaseLanguageModel
+from langchain_core.messages import AIMessage
 from langchain_core.outputs import ChatGeneration, Generation, LLMResult
 from langchain_openai.chat_models import AzureChatOpenAI, ChatOpenAI
 from langchain_openai.llms import AzureOpenAI, OpenAI
@@ -805,6 +807,61 @@ class InstructorBaseRagasLLM(ABC):
         """Asynchronously generate a response using the configured LLM."""
 
 
+def _instructor_usage_result(output: BaseModel) -> t.Optional[LLMResult]:
+    """Adapt Instructor's raw provider token usage for standard cost callbacks."""
+    raw = getattr(output, "_raw_response", None)
+    if raw is None:
+        return None
+
+    def value(source: t.Any, key: str) -> t.Any:
+        return (
+            source.get(key) if isinstance(source, dict) else getattr(source, key, None)
+        )
+
+    usage = value(raw, "usage") or value(raw, "usage_metadata")
+    if usage is None:
+        return None
+
+    def first(*values: t.Any) -> t.Any:
+        return next((v for v in values if v is not None), None)
+
+    input_tokens = first(
+        value(usage, "prompt_tokens"),
+        value(usage, "input_tokens"),
+        value(usage, "prompt_token_count"),
+    )
+    output_tokens = first(
+        value(usage, "completion_tokens"),
+        value(usage, "output_tokens"),
+        value(usage, "candidates_token_count"),
+    )
+    if input_tokens is None or output_tokens is None:
+        # A parsed Instructor model without raw usage is not a measured cost.
+        return None
+
+    model = first(
+        value(raw, "model"), value(raw, "model_version"), value(raw, "model_id"), ""
+    )
+    tokens = {
+        "prompt_tokens": int(input_tokens),
+        "completion_tokens": int(output_tokens),
+        "input_tokens": int(input_tokens),
+        "output_tokens": int(output_tokens),
+    }
+    message = AIMessage(
+        content=output.model_dump_json(),
+        response_metadata={
+            "usage": tokens,
+            "model": str(model),
+            "model_id": str(model),
+        },
+    )
+    return LLMResult(
+        generations=[[ChatGeneration(message=message)]],
+        llm_output={"token_usage": tokens, "model_name": str(model)},
+    )
+
+
 class InstructorLLM(InstructorBaseRagasLLM):
     """LLM wrapper using the Instructor library for structured outputs."""
 
@@ -1124,8 +1181,38 @@ class InstructorLLM(InstructorBaseRagasLLM):
                 loop.close()
                 asyncio.set_event_loop(None)
 
+    def _record_token_usage(
+        self, result: BaseModel, prompt: str, callbacks: Callbacks = None
+    ) -> None:
+        """Report only measured provider usage, once per underlying model request.
+
+        The method is called inside the generation functions, so cache hits
+        bypass it instead of charging already-cached responses a second time.
+        """
+        if callbacks is None:
+            return
+
+        usage_result = _instructor_usage_result(result)
+        if usage_result is None:
+            return
+
+        from langchain_core.callbacks import CallbackManager
+
+        manager = (
+            CallbackManager.configure(inheritable_callbacks=callbacks)
+            if isinstance(callbacks, list)
+            else callbacks
+        )
+        run_managers = manager.on_llm_start(
+            {"name": self.model}, [prompt], run_id=uuid.uuid4()
+        )
+        run_managers[0].on_llm_end(usage_result)
+
     def _generate_sync(
-        self, prompt: str, response_model: t.Type[InstructorTypeVar]
+        self,
+        prompt: str,
+        response_model: t.Type[InstructorTypeVar],
+        callbacks: Callbacks = None,
     ) -> InstructorTypeVar:
         """Execute a synchronous LLM call.
 
@@ -1156,10 +1243,14 @@ class InstructorLLM(InstructorBaseRagasLLM):
                 **provider_kwargs,
             )
 
+        self._record_token_usage(result, prompt, callbacks)
         return result
 
     def generate(
-        self, prompt: str, response_model: t.Type[InstructorTypeVar]
+        self,
+        prompt: str,
+        response_model: t.Type[InstructorTypeVar],
+        callbacks: Callbacks = None,
     ) -> InstructorTypeVar:
         """Generate a response using the configured LLM.
 
@@ -1167,10 +1258,10 @@ class InstructorLLM(InstructorBaseRagasLLM):
         """
         if self.is_async:
             result = self._run_async_in_current_loop(
-                self.agenerate(prompt, response_model)
+                self.agenerate(prompt, response_model, callbacks=callbacks)
             )
         else:
-            result = self._generate_sync(prompt, response_model)
+            result = self._generate_sync(prompt, response_model, callbacks=callbacks)
 
         # Track the usage
         track(
@@ -1188,11 +1279,14 @@ class InstructorLLM(InstructorBaseRagasLLM):
         self,
         prompt: str,
         response_model: t.Type[InstructorTypeVar],
+        callbacks: Callbacks = None,
     ) -> InstructorTypeVar:
         """Asynchronously generate a response using the configured LLM."""
         # If client is sync, offload to a thread to avoid blocking the event loop
         if not self.is_async:
-            return await asyncio.to_thread(self._generate_sync, prompt, response_model)
+            return await asyncio.to_thread(
+                self._generate_sync, prompt, response_model, callbacks
+            )
 
         messages = []
         if self.system_prompt:
@@ -1217,6 +1311,8 @@ class InstructorLLM(InstructorBaseRagasLLM):
                 response_model=response_model,
                 **provider_kwargs,
             )
+
+        self._record_token_usage(result, prompt, callbacks)
 
         # Track the usage
         track(
