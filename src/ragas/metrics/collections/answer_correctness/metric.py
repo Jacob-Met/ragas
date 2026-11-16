@@ -172,13 +172,14 @@ class AnswerCorrectness(BaseMetric):
         reference_statements = await self._generate_statements(user_input, reference)
 
         # Step 2: Calculate factuality score via TP/FP/FN classification
+        classification = None
         if response_statements and reference_statements:
             classification = await self._classify_statements(
                 user_input, response_statements, reference_statements
             )
             factuality_score = self._compute_f1_score(classification)
         else:
-            # If no statements generated, assume perfect match
+            # Preserve the existing fallback, but expose it to the caller.
             factuality_score = 1.0
 
         # Step 3: Calculate semantic similarity score
@@ -193,7 +194,49 @@ class AnswerCorrectness(BaseMetric):
             weights=self.weights,
         )
 
-        return MetricResult(value=float(final_score))
+        if classification is None:
+            reason = (
+                "No statements were extracted from the response or reference; "
+                "factuality was treated as 1.0."
+            )
+        else:
+            reason = (
+                f"Factuality {factuality_score:.3f}: {len(classification.TP)} matched, "
+                f"{len(classification.FP)} unsupported, and "
+                f"{len(classification.FN)} missing statements."
+            )
+            if classification.FP:
+                first = classification.FP[0]
+                reason += (
+                    f" First unsupported statement: {first.statement} ({first.reason})"
+                )
+            elif classification.FN:
+                first = classification.FN[0]
+                reason += (
+                    f" First missing statement: {first.statement} ({first.reason})"
+                )
+
+        if self.weights[1] > 0:
+            reason += f" Semantic similarity: {similarity_score:.3f}."
+
+        return MetricResult(
+            value=float(final_score),
+            reason=reason,
+            traces={
+                "output": {
+                    "factuality": float(factuality_score),
+                    "semantic_similarity": (
+                        float(similarity_score) if self.weights[1] > 0 else None
+                    ),
+                    "weights": list(self.weights),
+                    "classification": (
+                        classification.model_dump()
+                        if classification is not None
+                        else None
+                    ),
+                }
+            },
+        )
 
     async def _generate_statements(self, question: str, text: str) -> List[str]:
         """Generate atomic statements from text using the statement generator prompt."""
