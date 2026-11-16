@@ -1,8 +1,12 @@
 from __future__ import annotations
 
+import hashlib
+import json
 import logging
 import random
 import typing as t
+import uuid
+from collections import defaultdict
 from dataclasses import dataclass, field
 
 from langchain_core.callbacks import BaseCallbackManager
@@ -49,6 +53,64 @@ if t.TYPE_CHECKING:
 
 RAGAS_TESTSET_GENERATION_GROUP_NAME = "ragas testset generation"
 logger = logging.getLogger(__name__)
+
+
+def _canonical_source_metadata(value: t.Any) -> t.Any:
+    """Represent metadata in a stable order even with mixed-type keys and sets."""
+    if isinstance(value, dict):
+        pairs = [
+            [
+                f"{type(key).__module__}.{type(key).__qualname__}",
+                str(key),
+                _canonical_source_metadata(item),
+            ]
+            for key, item in value.items()
+        ]
+        return {"dict": sorted(pairs, key=lambda pair: (pair[0], pair[1]))}
+    if isinstance(value, (set, frozenset)):
+        entries = [_canonical_source_metadata(item) for item in value]
+        return {
+            "set": sorted(
+                entries, key=lambda item: json.dumps(item, sort_keys=True, default=str)
+            )
+        }
+    if isinstance(value, (list, tuple)):
+        return [_canonical_source_metadata(item) for item in value]
+    return value
+
+
+def _source_nodes(
+    sources: t.Iterable[t.Tuple[NodeType, str, dict]],
+) -> t.List[Node]:
+    """Assign stable IDs to ingested source records, retaining repeated records.
+
+    A source's type, content, and metadata determine its identity. Repeated
+    identical sources get distinct occurrence IDs instead of silently merging.
+    """
+    occurrences: t.Dict[str, int] = defaultdict(int)
+    nodes = []
+    for node_type, content, metadata in sources:
+        source_key = hashlib.sha256(
+            json.dumps(
+                [node_type.value, content, _canonical_source_metadata(metadata)],
+                sort_keys=True,
+                ensure_ascii=False,
+                separators=(",", ":"),
+                default=str,
+            ).encode("utf-8")
+        ).hexdigest()
+        occurrence = occurrences[source_key]
+        occurrences[source_key] += 1
+        nodes.append(
+            Node(
+                id=uuid.uuid5(
+                    uuid.NAMESPACE_URL, f"ragas:source:v1:{source_key}:{occurrence}"
+                ),
+                type=node_type,
+                properties={"page_content": content, "document_metadata": metadata},
+            )
+        )
+    return nodes
 
 
 @dataclass
@@ -190,18 +252,10 @@ class TestsetGenerator:
                 embedding_model=transforms_embedding_model or self.embedding_model,
             )
 
-        # convert the documents to Ragas nodes
-        nodes = []
-        for doc in documents:
-            node = Node(
-                type=NodeType.DOCUMENT,
-                properties={
-                    "page_content": doc.page_content,
-                    "document_metadata": doc.metadata,
-                },
-            )
-            nodes.append(node)
-
+        # Stable identities make rebuilding the same source graph reproducible.
+        nodes = _source_nodes(
+            (NodeType.DOCUMENT, doc.page_content, doc.metadata) for doc in documents
+        )
         kg = KnowledgeGraph(nodes=nodes)
 
         # apply transforms and update the knowledge graph
@@ -269,19 +323,11 @@ class TestsetGenerator:
                 embedding_model=embedding_model_for_transforms,
             )
 
-        # convert the documents to Ragas nodes
-        nodes = []
-        for doc in documents:
-            if doc.text is not None and doc.text.strip() != "":
-                node = Node(
-                    type=NodeType.DOCUMENT,
-                    properties={
-                        "page_content": doc.text,
-                        "document_metadata": doc.metadata,
-                    },
-                )
-                nodes.append(node)
-
+        nodes = _source_nodes(
+            (NodeType.DOCUMENT, doc.text, doc.metadata)
+            for doc in documents
+            if doc.text is not None and doc.text.strip() != ""
+        )
         kg = KnowledgeGraph(nodes=nodes)
 
         # apply transforms and update the knowledge graph
@@ -374,27 +420,17 @@ class TestsetGenerator:
                 embedding_model=transforms_embedding_model or self.embedding_model,
             )
 
-        # convert the chunks to Ragas nodes
-        nodes = []
-        for chunk in chunks:
-            if isinstance(chunk, str):
-                page_content = chunk
-                metadata = {}
-            else:
-                page_content = chunk.page_content
-                metadata = chunk.metadata
+        # Use the same source identity rules for pre-chunked material.
+        def chunk_sources():
+            for chunk in chunks:
+                if isinstance(chunk, str):
+                    page_content, metadata = chunk, {}
+                else:
+                    page_content, metadata = chunk.page_content, chunk.metadata
+                if page_content is not None and page_content.strip() != "":
+                    yield NodeType.CHUNK, page_content, metadata
 
-            if page_content is not None and page_content.strip() != "":
-                node = Node(
-                    type=NodeType.CHUNK,
-                    properties={
-                        "page_content": page_content,
-                        "document_metadata": metadata,
-                    },
-                )
-                nodes.append(node)
-
-        kg = KnowledgeGraph(nodes=nodes)
+        kg = KnowledgeGraph(nodes=_source_nodes(chunk_sources()))
 
         # apply transforms and update the knowledge graph
         apply_transforms(kg, transforms, run_config=run_config or RunConfig())
