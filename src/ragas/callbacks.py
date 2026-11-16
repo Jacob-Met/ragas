@@ -157,17 +157,27 @@ def parse_run_traces(
             metric_traces.scores[metric_trace.name] = metric_trace.outputs.get(
                 "output", {}
             )
-            # get all the prompt IO from the metric trace
-            prompt_traces = {}
-            for i, prompt_uuid in enumerate(metric_trace.children):
+            # Preserve every invocation when a prompt is called more than once.
+            # Single calls retain their original dictionary shape for consumers.
+            prompt_traces: t.Dict[str, t.Any] = {}
+            for prompt_uuid in metric_trace.children:
                 prompt_trace = traces[prompt_uuid]
                 output = prompt_trace.outputs.get("output", {})
-                output = output[0] if isinstance(output, list) else output
-                prompt_traces[f"{prompt_trace.name}"] = {
+                if isinstance(output, list) and len(output) == 1:
+                    output = output[0]
+                invocation = {
                     "input": prompt_trace.inputs.get("data", {}),
                     "output": output,
                 }
-            metric_traces[f"{metric_trace.name}"] = prompt_traces
+                name = prompt_trace.name
+                previous = prompt_traces.get(name)
+                if previous is None:
+                    prompt_traces[name] = invocation
+                elif isinstance(previous, list):
+                    previous.append(invocation)
+                else:
+                    prompt_traces[name] = [previous, invocation]
+            metric_traces[metric_trace.name] = prompt_traces
         parased_traces.append(metric_traces)
 
     return parased_traces
