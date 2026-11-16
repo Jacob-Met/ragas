@@ -1,4 +1,5 @@
 import typing as t
+import uuid
 from dataclasses import dataclass
 
 from ragas.testset.graph import Node, NodeType, Relationship
@@ -56,6 +57,10 @@ class HeadlineSplitter(Splitter):
         return adjusted_chunks
 
     async def split(self, node: Node) -> t.Tuple[t.List[Node], t.List[Relationship]]:
+        # Chunks produced by a previous pass are not source documents.
+        if node.type == NodeType.CHUNK:
+            return [], []
+
         text = node.get_property("page_content")
         if text is None:
             raise ValueError("'page_content' property not found in this node")
@@ -82,8 +87,12 @@ class HeadlineSplitter(Splitter):
 
         # create the nodes
         nodes = [
-            Node(type=NodeType.CHUNK, properties={"page_content": chunk})
-            for chunk in chunks
+            Node(
+                id=uuid.uuid5(node.id, f"headline-split:v1:{index}:{chunk}"),
+                type=NodeType.CHUNK,
+                properties={"page_content": chunk},
+            )
+            for index, chunk in enumerate(chunks)
         ]
 
         # create the relationships for children
@@ -91,6 +100,7 @@ class HeadlineSplitter(Splitter):
         for child_node in nodes:
             relationships.append(
                 Relationship(
+                    id=uuid.uuid5(node.id, f"headline-split:v1:child:{child_node.id}"),
                     type="child",
                     source=node,
                     target=child_node,
@@ -102,6 +112,10 @@ class HeadlineSplitter(Splitter):
             if i < len(nodes) - 1:
                 relationships.append(
                     Relationship(
+                        id=uuid.uuid5(
+                            node.id,
+                            f"headline-split:v1:next:{child_node.id}:{nodes[i + 1].id}",
+                        ),
                         type="next",
                         source=child_node,
                         target=nodes[i + 1],
