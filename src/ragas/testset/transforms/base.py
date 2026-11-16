@@ -1,5 +1,6 @@
 import logging
 import typing as t
+import uuid
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 
@@ -376,7 +377,27 @@ class RelationshipBuilder(BaseGraphTransformation):
             filtered_kg: KnowledgeGraph, original_kg: KnowledgeGraph
         ):
             relationships = await self.transform(filtered_kg)
-            original_kg.relationships.extend(relationships)
+
+            def key_for(rel: Relationship):
+                source, target = rel.source.id, rel.target.id
+                if rel.bidirectional:
+                    source, target = sorted((source, target))
+                return rel.type, rel.bidirectional, source, target
+
+            # Relationship identity is the connection, not the score of its
+            # current properties. Re-runs update scores without losing notes.
+            existing = {key_for(rel): rel for rel in original_kg.relationships}
+            for relationship in relationships:
+                key = key_for(relationship)
+                if key in existing:
+                    existing[key].properties.update(relationship.properties)
+                else:
+                    relationship.id = uuid.uuid5(
+                        uuid.NAMESPACE_URL,
+                        f"ragas:relationship-builder:v1:{key!r}",
+                    )
+                    original_kg.relationships.append(relationship)
+                    existing[key] = relationship
 
         filtered_kg = self.filter(kg)
         plan = [apply_build_relationships(filtered_kg=filtered_kg, original_kg=kg)]
