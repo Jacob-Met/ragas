@@ -74,6 +74,7 @@ def is_langchain_llm(
 
 logger = logging.getLogger(__name__)
 
+
 # type variables for input and output models
 InputModel = t.TypeVar("InputModel", bound=BaseModel)
 OutputModel = t.TypeVar("OutputModel", bound=BaseModel)
@@ -257,15 +258,29 @@ class PydanticPrompt(BasePrompt, t.Generic[InputModel, OutputModel]):
 
             instructor_llm = t.cast(InstructorLLM, llm)
             if instructor_llm.is_async:
-                result = await llm.agenerate(
-                    prompt=prompt_value.text,
-                    response_model=self.output_model,
-                )
+                if isinstance(llm, InstructorLLM):
+                    result = await llm.agenerate(
+                        prompt=prompt_value.text,
+                        response_model=self.output_model,
+                        callbacks=prompt_cb,
+                    )
+                else:
+                    result = await llm.agenerate(
+                        prompt=prompt_value.text,
+                        response_model=self.output_model,
+                    )
             else:
-                result = llm.generate(
-                    prompt=prompt_value.text,
-                    response_model=self.output_model,
-                )
+                if isinstance(llm, InstructorLLM):
+                    result = llm.generate(
+                        prompt=prompt_value.text,
+                        response_model=self.output_model,
+                        callbacks=prompt_cb,
+                    )
+                else:
+                    result = llm.generate(
+                        prompt=prompt_value.text,
+                        response_model=self.output_model,
+                    )
             # Wrap the single response in an LLMResult-like structure for consistency
             from langchain_core.outputs import Generation, LLMResult
 
