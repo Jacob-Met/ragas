@@ -117,17 +117,50 @@ class Faithfulness(BaseMetric):
         statements = await self._create_statements(user_input, response)
 
         if not statements:
-            # No statements generated - return NaN like legacy
-            return MetricResult(value=float("nan"))
+            return MetricResult(
+                value=float("nan"),
+                reason="No statements could be extracted from the response.",
+                traces={"output": {"statements": []}},
+            )
 
         # Step 2: Join all contexts and evaluate statements against them
         context_str = "\n".join(retrieved_contexts)
         verdicts = await self._create_verdicts(statements, context_str)
 
-        # Step 3: Compute faithfulness score
-        score = self._compute_score(verdicts)
+        if not verdicts.statements:
+            return MetricResult(
+                value=float("nan"),
+                reason="No verdicts were returned for the generated statements.",
+                traces={"output": {"statements": []}},
+            )
 
-        return MetricResult(value=float(score))
+        # Step 3: Compute faithfulness score and expose the judge's reasoning.
+        score = self._compute_score(verdicts)
+        unsupported = [
+            statement for statement in verdicts.statements if not statement.verdict
+        ]
+        supported = len(verdicts.statements) - len(unsupported)
+        reason = (
+            f"{supported} of {len(verdicts.statements)} statements were judged "
+            "supported by the retrieved context."
+        )
+        if unsupported:
+            first = unsupported[0]
+            reason += (
+                f" First unsupported statement: {first.statement} ({first.reason})"
+            )
+
+        return MetricResult(
+            value=float(score),
+            reason=reason,
+            traces={
+                "output": {
+                    "statements": [
+                        statement.model_dump() for statement in verdicts.statements
+                    ]
+                }
+            },
+        )
 
     async def _create_statements(self, question: str, response: str) -> List[str]:
         """Break response into atomic statements using statement generator."""

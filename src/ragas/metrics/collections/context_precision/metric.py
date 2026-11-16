@@ -18,6 +18,35 @@ if t.TYPE_CHECKING:
     from ragas.llms.base import InstructorBaseRagasLLM
 
 
+def _precision_result_with_reasons(
+    score: float, judgments: List[ContextPrecisionOutput]
+) -> MetricResult:
+    """Preserve the per-context reasons already returned by the evaluator."""
+    unsupported = [
+        (index, judgment)
+        for index, judgment in enumerate(judgments)
+        if not judgment.verdict
+    ]
+    supported = len(judgments) - len(unsupported)
+    reason = f"{supported} of {len(judgments)} retrieved contexts were judged useful."
+    if unsupported:
+        index, first = unsupported[0]
+        reason += f" Context {index + 1} was not useful: {first.reason}"
+
+    return MetricResult(
+        value=float(score),
+        reason=reason,
+        traces={
+            "output": {
+                "contexts": [
+                    {"index": index, **judgment.model_dump()}
+                    for index, judgment in enumerate(judgments)
+                ]
+            }
+        },
+    )
+
+
 class ContextPrecisionWithReference(BaseMetric):
     """
     Modern v2 implementation of context precision with reference.
@@ -102,6 +131,7 @@ class ContextPrecisionWithReference(BaseMetric):
 
         # Evaluate each retrieved context
         verdicts = []
+        judgments = []
         for context in retrieved_contexts:
             # Create input data and generate prompt
             input_data = ContextPrecisionInput(
@@ -110,10 +140,11 @@ class ContextPrecisionWithReference(BaseMetric):
             prompt_string = self.prompt.to_string(input_data)
             result = await self.llm.agenerate(prompt_string, ContextPrecisionOutput)
             verdicts.append(result.verdict)
+            judgments.append(result)
 
-        # Calculate average precision
+        # Calculate average precision without discarding the judge's reasons
         score = self._calculate_average_precision(verdicts)
-        return MetricResult(value=float(score))
+        return _precision_result_with_reasons(float(score), judgments)
 
     def _calculate_average_precision(self, verdicts: List[int]) -> float:
         """Calculate average precision from binary verdicts."""
@@ -222,6 +253,7 @@ class ContextPrecisionWithoutReference(BaseMetric):
 
         # Evaluate each retrieved context
         verdicts = []
+        judgments = []
         for context in retrieved_contexts:
             # Create input data and generate prompt
             input_data = ContextPrecisionInput(
@@ -230,10 +262,11 @@ class ContextPrecisionWithoutReference(BaseMetric):
             prompt_string = self.prompt.to_string(input_data)
             result = await self.llm.agenerate(prompt_string, ContextPrecisionOutput)
             verdicts.append(result.verdict)
+            judgments.append(result)
 
-        # Calculate average precision
+        # Calculate average precision without discarding the judge's reasons
         score = self._calculate_average_precision(verdicts)
-        return MetricResult(value=float(score))
+        return _precision_result_with_reasons(float(score), judgments)
 
     def _calculate_average_precision(self, verdicts: List[int]) -> float:
         """Calculate average precision from binary verdicts."""

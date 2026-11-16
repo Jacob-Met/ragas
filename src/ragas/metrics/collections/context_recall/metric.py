@@ -118,12 +118,34 @@ class ContextRecall(BaseMetric):
         # Get classifications from LLM
         result = await self.llm.agenerate(prompt_string, ContextRecallOutput)
 
-        # Calculate score
+        # Calculate score and retain the per-claim explanations from the judge
         if not result.classifications:
-            return MetricResult(value=np.nan)
+            return MetricResult(
+                value=np.nan,
+                reason="No classifications were returned for the reference claims.",
+                traces={"output": {"classifications": []}},
+            )
 
-        # Count attributions
-        attributions = [c.attributed for c in result.classifications]
-        score = sum(attributions) / len(attributions) if attributions else np.nan
+        attributions = [item.attributed for item in result.classifications]
+        score = sum(attributions) / len(attributions)
+        missing = [item for item in result.classifications if not item.attributed]
+        reason = (
+            f"{len(result.classifications) - len(missing)} of "
+            f"{len(result.classifications)} reference claims were judged attributable "
+            "to the retrieved context."
+        )
+        if missing:
+            first = missing[0]
+            reason += f" First unattributed claim: {first.statement} ({first.reason})"
 
-        return MetricResult(value=float(score))
+        return MetricResult(
+            value=float(score),
+            reason=reason,
+            traces={
+                "output": {
+                    "classifications": [
+                        item.model_dump() for item in result.classifications
+                    ]
+                }
+            },
+        )
