@@ -16,7 +16,6 @@ from ragas.metrics.base import (
     MetricWithLLM,
     SingleTurnMetric,
 )
-from ragas.metrics.utils import fbeta_score
 from ragas.prompt import PydanticPrompt
 
 if t.TYPE_CHECKING:
@@ -279,19 +278,28 @@ class FactualCorrectness(MetricWithLLM, SingleTurnMetric):
             reference_response_task, response_reference_task
         )
 
-        tp = sum(reference_response)
-        fp = sum(~reference_response)
-        if self.mode != "precision":
-            fn = sum(~response_reference)
-        else:
-            fn = 0
+        # The two directions decompose different texts and therefore have
+        # different true-positive counts. Precision judges response claims;
+        # recall judges reference claims.
+        precision_tp = sum(reference_response)
+        precision = precision_tp / (len(reference_response) + 1e-8)
 
         if self.mode == "precision":
-            score = tp / (tp + fp + 1e-8)
-        elif self.mode == "recall":
-            score = tp / (tp + fn + 1e-8)
+            score = precision
         else:
-            score = fbeta_score(tp, fp, fn, self.beta)
+            recall_tp = sum(response_reference)
+            recall = recall_tp / (len(response_reference) + 1e-8)
+
+            if self.mode == "recall":
+                score = recall
+            else:
+                beta_squared = self.beta**2
+                score = (
+                    (1 + beta_squared)
+                    * precision
+                    * recall
+                    / (beta_squared * precision + recall + 1e-8)
+                )
 
         return np.round(score, 2)
 
