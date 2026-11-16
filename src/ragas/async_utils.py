@@ -67,6 +67,8 @@ def as_completed(
 
     Returns an iterator of futures that completes as tasks finish.
     """
+    if max_workers != -1 and max_workers <= 0:
+        raise ValueError("max_workers must be -1 (unlimited) or a positive integer")
     if max_workers == -1:
         tasks = [asyncio.create_task(coro) for coro in coroutines]
     else:
