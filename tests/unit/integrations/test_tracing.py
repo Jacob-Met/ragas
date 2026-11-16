@@ -7,6 +7,7 @@ to avoid external dependencies in tests.
 
 import os
 from datetime import datetime
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -81,6 +82,10 @@ class TestLangfuseIntegration:
         ) as mock_langfuse_class:
             mock_client = MagicMock()
             mock_langfuse_class.return_value = mock_client
+            mock_client.api.observations.get_many.return_value = SimpleNamespace(
+                data=[SimpleNamespace(name="sample", id="obs-1")],
+                meta=SimpleNamespace(cursor=None),
+            )
 
             result = await sync_trace(
                 trace_id="test-trace-id", max_retries=1, delay=0.1
@@ -100,6 +105,10 @@ class TestLangfuseIntegration:
             mock_client = MagicMock()
             mock_client.get_current_trace_id.return_value = "current-trace-id"
             mock_langfuse_class.return_value = mock_client
+            mock_client.api.observations.get_many.return_value = SimpleNamespace(
+                data=[SimpleNamespace(name="sample", id="obs-1")],
+                meta=SimpleNamespace(cursor=None),
+            )
 
             result = await sync_trace(max_retries=1, delay=0.1)
 

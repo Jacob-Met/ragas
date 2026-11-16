@@ -1,76 +1,24 @@
-"""Utils to help to interact with langfuse traces"""
+"""Utils to help interact with Langfuse traces."""
 
 __all__ = ["observe", "logger", "LangfuseTrace", "sync_trace", "add_query_param"]
 
 import asyncio
 import logging
 import typing as t
-from datetime import datetime
+from dataclasses import dataclass
 from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 
-if t.TYPE_CHECKING:
+try:
     from langfuse import Langfuse, observe
-    from langfuse.api import Observation, TraceWithFullDetails
-else:
-    try:
-        from langfuse import Langfuse, observe  # type: ignore
-        from langfuse.api import Observation, TraceWithFullDetails  # type: ignore
 
-        LANGFUSE_AVAILABLE = True
-    except ImportError:
-        LANGFUSE_AVAILABLE = False
-
-        # Define stub classes for type checking when imports fail
-        class Observation:  # type: ignore
-            name: str = ""
-
-        class TraceWithFullDetails:  # type: ignore
-            def __init__(
-                self,
-                id: str = "",
-                timestamp: t.Optional[datetime] = None,
-                htmlPath: str = "",
-                latency: int = 0,
-                totalCost: float = 0.0,
-                observations: t.Optional[t.List[t.Any]] = None,
-                scores: t.Optional[t.List[t.Any]] = None,
-                tags: t.Optional[t.List[str]] = None,
-                public: bool = False,
-                environment: str = "",
-            ):  # type: ignore
-                self.id = id
-                self.timestamp = timestamp or datetime.now()
-                self.htmlPath = htmlPath
-                self.latency = latency
-                self.totalCost = totalCost
-                self.observations = observations or []
-                self.scores = scores or []
-                self.tags = tags or []
-                self.public = public
-                self.environment = environment
-
-        class Langfuse:  # type: ignore
-            def get_current_trace_id(self) -> t.Optional[str]:  # type: ignore
-                return None
-
-            def get_trace_url(self) -> t.Optional[str]:  # type: ignore
-                return None
-
-            def get_dataset(self, *args, **kwargs):  # type: ignore
-                return None
-
-        def observe(*args, **kwargs):  # type: ignore
-            def decorator(func):
-                return func
-
-            return decorator
-
-
-# ensure observe is defined in global namespace
-# This is needed because observe might be imported conditionally
-if "observe" not in globals():
+    LANGFUSE_AVAILABLE = True
+except ImportError:
+    LANGFUSE_AVAILABLE = False
+    Langfuse = None  # type: ignore[assignment, misc]
 
     def observe(*args, **kwargs):  # type: ignore
+        """Preserve importability when tracing is not installed."""
+
         def decorator(func):
             return func
 
@@ -80,37 +28,47 @@ if "observe" not in globals():
 logger = logging.getLogger(__name__)
 
 
+@dataclass
+class _ObservationTrace:
+    """A trace assembled from the real v4 observations endpoint."""
+
+    id: str
+    observations: t.List[t.Any]
+
+
 class LangfuseTrace:
-    def __init__(self, trace: "TraceWithFullDetails"):
+    def __init__(self, trace: t.Any, client: t.Optional[t.Any] = None):
         self.trace = trace
-        self._langfuse_client = Langfuse()
+        if client is None:
+            if Langfuse is None:
+                raise ImportError("Install ragas[tracing] to use Langfuse tracing")
+            client = Langfuse()
+        self._langfuse_client = client
 
     def get_url(self) -> t.Optional[str]:
-        return self._langfuse_client.get_trace_url()
+        return self._langfuse_client.get_trace_url(trace_id=self.trace.id)
 
-    def filter(self, span_name: str) -> t.List["Observation"]:
-        # Note: In modern Langfuse, filtering would need to be done differently
-        # This is a placeholder implementation for backward compatibility
-        return []
+    def filter(self, span_name: str) -> t.List[t.Any]:
+        return [
+            observation
+            for observation in self.trace.observations
+            if observation.name == span_name
+        ]
 
 
 async def sync_trace(
     trace_id: t.Optional[str] = None, max_retries: int = 10, delay: float = 2
 ) -> LangfuseTrace:
-    """Wait for a Langfuse trace to be synced to the server.
+    """Wait for a trace's observations to arrive in Langfuse.
 
-    Args:
-        trace_id: The ID of the trace to wait for
-        max_retries: Maximum number of retry attempts (default: 10)
-        delay: Delay between retries in seconds (default: 0.5)
-
-    Returns:
-        Trace object if found, None if not found after retries
+    The v4 observations endpoint replaces the deprecated trace read endpoint.
+    Fetching all pages happens off the event loop.
     """
-    langfuse_client = Langfuse()
+    if not LANGFUSE_AVAILABLE or Langfuse is None:
+        raise ImportError("Install ragas[tracing] to use Langfuse tracing")
 
+    langfuse_client = Langfuse()
     if trace_id is None:
-        # if no trace id is provided, get the current trace id
         trace_id = langfuse_client.get_current_trace_id()
 
     if not trace_id:
@@ -118,42 +76,42 @@ async def sync_trace(
             "No trace id found. Please ensure you are running this function within a function decorated with @observe()."
         )
 
-    for _ in range(max_retries):
-        try:
-            # In modern Langfuse, we would use a different method to fetch traces
-            # This is a placeholder that creates a mock trace for backward compatibility
-            trace = TraceWithFullDetails(
-                id=trace_id,
-                timestamp=datetime.now(),
-                htmlPath="",
-                latency=0,
-                totalCost=0.0,
-                observations=[],
-                scores=[],
-                tags=[],
-                public=False,
-                environment="",
-            )
-            return LangfuseTrace(trace=trace)
-        except Exception as e:
-            logger.debug(f"Trace {trace_id} not yet synced: {str(e)}")
+    def fetch_observations() -> t.List[t.Any]:
+        observations: t.List[t.Any] = []
+        cursor: t.Optional[str] = None
+        seen_cursors: t.Set[str] = set()
 
-        await asyncio.sleep(delay)
+        while True:
+            page = langfuse_client.api.observations.get_many(
+                trace_id=trace_id, fields="core,basic,io", limit=100, cursor=cursor
+            )
+            observations.extend(page.data)
+            cursor = page.meta.cursor
+            if cursor is None:
+                return observations
+            if cursor in seen_cursors:
+                raise RuntimeError(
+                    f"Langfuse returned a repeated observations cursor for {trace_id}"
+                )
+            seen_cursors.add(cursor)
+
+    for attempt in range(max_retries):
+        observations = await asyncio.to_thread(fetch_observations)
+        if observations:
+            return LangfuseTrace(
+                trace=_ObservationTrace(id=trace_id, observations=observations),
+                client=langfuse_client,
+            )
+        if attempt + 1 < max_retries:
+            await asyncio.sleep(delay)
 
     raise ValueError(f"Trace {trace_id} not found after {max_retries} attempts")
 
 
 def add_query_param(url: str, param_name: str, param_value: str) -> str:
     """Add a query parameter to a URL."""
-    # Parse the URL
     url_parts = list(urlparse(url))
-
-    # Get query params as a dict and add new param
     query_dict = dict(parse_qsl(url_parts[4]))
     query_dict[param_name] = param_value
-
-    # Replace the query part with updated params
     url_parts[4] = urlencode(query_dict)
-
-    # Reconstruct the URL
     return urlunparse(url_parts)

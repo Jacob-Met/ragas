@@ -258,7 +258,7 @@ nest_asyncio.apply()
 
 
 ```python
-from langfuse.decorators import observe, langfuse_context
+from langfuse import observe, get_client
 from asyncio import run
 
 
@@ -280,8 +280,10 @@ def rag_pipeline(question):
 
     # score the runs
     score = run(score_with_ragas(question, contexts, answer=generated_answer))
+    langfuse = get_client()
+    trace_id = langfuse.get_current_trace_id()
     for s in score:
-        langfuse_context.score_current_trace(name=s, value=score[s])
+        langfuse.create_score(name=s, value=float(score[s]), trace_id=trace_id)
     return generated_answer
 ```
 

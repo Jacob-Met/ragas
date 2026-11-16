@@ -55,7 +55,7 @@ all = [
 
 # Specific integrations
 git = ["GitPython"]
-tracing = ["langfuse>=3.2.4", "mlflow>=3.1.4"]
+tracing = ["langfuse>=4.7,<5", "mlflow>=3.1.4"]
 gdrive = [
     "google-api-python-client>=2.178.0",
     "google-auth>=2.40.3",
@@ -173,8 +173,6 @@ dev = [
     "llama-index-core<0.14.15; python_version < '3.10'",
     # langchain-community 0.4 removed chat_models.vertexai, imported by ragas.llms.base
     "langchain-community<0.4",
-    # langfuse 4 stopped accepting htmlPath in TraceWithFullDetails, breaking sync_trace
-    "langfuse<4",
     # haystack-ai 3 and the numpy 2.4 stubs fail `make type`
     "haystack-ai<3",
     "numpy<2.4",
