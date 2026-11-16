@@ -143,14 +143,14 @@ class AnswerRelevancy(BaseMetric):
         norm = np.linalg.norm(gen_question_vec, axis=1) * np.linalg.norm(
             question_vec, axis=1
         )
-        cosine_sim = (
-            np.dot(gen_question_vec, question_vec.T).reshape(
-                -1,
-            )
-            / norm
+        dot_products = np.dot(gen_question_vec, question_vec.T).reshape(-1)
+        cosine_sim = np.divide(
+            dot_products,
+            norm,
+            out=np.zeros_like(norm, dtype=float),
+            where=norm > 0,
         )
-
         # Score is average cosine similarity, reduced to 0 if response is noncommittal
         score = cosine_sim.mean() * int(not all_noncommittal)
 
-        return MetricResult(value=float(score))
+        return MetricResult(value=float(np.clip(score, 0.0, 1.0)))

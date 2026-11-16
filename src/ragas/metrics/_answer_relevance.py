@@ -104,12 +104,14 @@ class ResponseRelevancy(MetricWithLLM, MetricWithEmbeddings, SingleTurnMetric):
         norm = np.linalg.norm(gen_question_vec, axis=1) * np.linalg.norm(
             question_vec, axis=1
         )
-        return (
-            np.dot(gen_question_vec, question_vec.T).reshape(
-                -1,
-            )
-            / norm
+        dot_products = np.dot(gen_question_vec, question_vec.T).reshape(-1)
+        similarity = np.divide(
+            dot_products,
+            norm,
+            out=np.zeros_like(norm, dtype=float),
+            where=norm > 0,
         )
+        return similarity
 
     def _calculate_score(
         self, answers: t.Sequence[ResponseRelevanceOutput], row: t.Dict
@@ -126,7 +128,7 @@ class ResponseRelevancy(MetricWithLLM, MetricWithEmbeddings, SingleTurnMetric):
             cosine_sim = self.calculate_similarity(question, gen_questions)
             score = cosine_sim.mean() * int(not all_noncommittal)
 
-        return score
+        return float(np.clip(score, 0.0, 1.0))
 
     async def _single_turn_ascore(
         self, sample: SingleTurnSample, callbacks: Callbacks
