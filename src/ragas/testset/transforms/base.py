@@ -306,10 +306,19 @@ class Splitter(BaseGraphTransformation):
             A sequence of coroutines to be executed in parallel.
         """
 
+        existing_node_ids = {item.id for item in kg.nodes}
+        existing_relationship_ids = {item.id for item in kg.relationships}
+
         async def apply_split(node: Node):
             nodes, relationships = await self.split(node)
-            kg.nodes.extend(nodes)
-            kg.relationships.extend(relationships)
+            for new_node in nodes:
+                if new_node.id not in existing_node_ids:
+                    kg.nodes.append(new_node)
+                    existing_node_ids.add(new_node.id)
+            for relationship in relationships:
+                if relationship.id not in existing_relationship_ids:
+                    kg.relationships.append(relationship)
+                    existing_relationship_ids.add(relationship.id)
 
         filtered = self.filter(kg)
         plan = [apply_split(node) for node in filtered.nodes]
