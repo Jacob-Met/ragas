@@ -10,6 +10,12 @@ from ragas.run_config import RunConfig
 
 @dataclass
 class BleuScore(SingleTurnMetric):
+    """BLEU for a single response/reference pair, including short texts.
+
+    Pass kwargs={"tokenize": "zh"} for Chinese character-level comparison;
+    use_effective_order defaults to True but may be overridden in kwargs.
+    """
+
     name: str = "bleu_score"
     _required_columns: t.Dict[MetricType, t.Set[str]] = field(
         default_factory=lambda: {MetricType.SINGLE_TURN: {"reference", "response"}}
@@ -35,14 +41,12 @@ class BleuScore(SingleTurnMetric):
         assert isinstance(reference, str), "BleuScore expects a valid reference string"
         assert isinstance(response, str), "BleuScore expects a valid response string"
 
-        reference_sentences = reference.split(". ")
-        response_sentences = response.split(". ")
-
-        reference = [[reference] for reference in reference_sentences]
-        response = response_sentences
-        score = self.corpus_bleu(response, reference, **self.kwargs).score / 100
-        assert isinstance(score, float), "Expecting a float"
-        return score
+        # Each metric call is one hypothesis/reference pair, not a corpus of
+        # period-delimited fragments or multiple reference streams.
+        options = {"use_effective_order": True, **self.kwargs}
+        score = self.corpus_bleu([response], [[reference]], **options).score / 100
+        # Roundoff can make even a perfect match slightly greater than one.
+        return min(1.0, max(0.0, score))
 
     async def _ascore(self, row: t.Dict, callbacks: Callbacks) -> float:
         return await self._single_turn_ascore(SingleTurnSample(**row), callbacks)
