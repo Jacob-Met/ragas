@@ -60,6 +60,8 @@ class RunConfig:
     seed: int = 42
 
     def __post_init__(self):
+        if self.max_workers != -1 and self.max_workers <= 0:
+            raise ValueError("max_workers must be -1 (unlimited) or a positive integer")
         self.rng = np.random.default_rng(seed=self.seed)
 
 
