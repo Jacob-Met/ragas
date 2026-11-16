@@ -85,12 +85,14 @@ class SemanticSimilarity(BaseMetric):
         embedding_1 = np.array(self.embeddings.embed_text(reference))
         embedding_2 = np.array(self.embeddings.embed_text(response))
 
-        norms_1 = np.linalg.norm(embedding_1, keepdims=True)
-        norms_2 = np.linalg.norm(embedding_2, keepdims=True)
-        embedding_1_normalized = embedding_1 / norms_1
-        embedding_2_normalized = embedding_2 / norms_2
-        similarity = embedding_1_normalized @ embedding_2_normalized.T
-        score = similarity.flatten()
+        norm = np.linalg.norm(embedding_1) * np.linalg.norm(embedding_2)
+        dot_product = embedding_1 @ embedding_2.T
+        score = np.divide(
+            dot_product,
+            norm,
+            out=np.zeros_like(dot_product, dtype=float),
+            where=norm > 0,
+        ).flatten()
 
         assert isinstance(score, np.ndarray), "Expects ndarray"
         if self.threshold:
