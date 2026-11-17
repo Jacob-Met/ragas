@@ -61,6 +61,7 @@ def as_completed(
     *,
     cancel_check: t.Optional[t.Callable[[], bool]] = None,
     cancel_pending: bool = True,
+    task_registry: t.Optional[t.MutableSequence[asyncio.Task]] = None,
 ) -> t.Iterator[asyncio.Future]:
     """
     Wrap coroutines with a semaphore if max_workers is specified.
@@ -77,6 +78,9 @@ def as_completed(
                 return await coro
 
         tasks = [asyncio.create_task(sema_coro(coro)) for coro in coroutines]
+
+    if task_registry is not None:
+        task_registry.extend(tasks)
 
     ac_iter = asyncio.as_completed(tasks)
 

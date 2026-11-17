@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 import threading
 import typing as t
+from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 
 import numpy as np
@@ -141,6 +143,40 @@ class Executor:
         await self._process_batched_jobs(jobs_to_process, pbm, max_workers, results)
         return results
 
+    @asynccontextmanager
+    async def _managed_futures(
+        self, coroutines: t.Sequence[t.Coroutine], max_workers: int
+    ) -> t.AsyncIterator[t.AsyncGenerator[t.Any, None]]:
+        """Own all evaluation jobs until they finish or their caller exits.
+
+        In particular, errors and cancellations must not leave other metric
+        calls running in the background after aresults() has returned.
+        """
+        tasks: t.List[asyncio.Task] = []
+        futures = None
+        try:
+            futures = process_futures(
+                as_completed(
+                    coroutines,
+                    max_workers,
+                    cancel_check=self.is_cancelled,
+                    task_registry=tasks,
+                )
+            )
+            yield futures
+        finally:
+            if futures is not None:
+                await futures.aclose()
+            for task in tasks:
+                if not task.done():
+                    task.cancel()
+            if tasks:
+                await asyncio.gather(*tasks, return_exceptions=True)
+            # Semaphore wrappers may have been cancelled before ever awaiting
+            # their inner job, in which case that coroutine must be closed.
+            for coro in coroutines:
+                coro.close()
+
     async def _process_batched_jobs(
         self, jobs_to_process, progress_manager, max_workers, results
     ):
@@ -164,16 +200,12 @@ class Executor:
                     afunc(*args, **kwargs) for afunc, args, kwargs, _ in batch
                 ]
 
-                async for result in process_futures(
-                    as_completed(
-                        coroutines, max_workers, cancel_check=self.is_cancelled
-                    )
-                ):
-                    # If jobs are configured to raise exceptions, propagate immediately
-                    if isinstance(result, Exception) and self.raise_exceptions:
-                        raise result
-                    results.append(result)
-                    batch_pbar.update(1)
+                async with self._managed_futures(coroutines, max_workers) as futures:
+                    async for result in futures:
+                        if isinstance(result, Exception) and self.raise_exceptions:
+                            raise result
+                        results.append(result)
+                        batch_pbar.update(1)
                 # Update overall progress bar for all futures in this batch
                 overall_pbar.update(len(batch))
 
@@ -181,14 +213,12 @@ class Executor:
         """Helper function to process coroutines and update the progress bar."""
         coroutines = [afunc(*args, **kwargs) for afunc, args, kwargs, _ in jobs]
 
-        async for result in process_futures(
-            as_completed(coroutines, max_workers, cancel_check=self.is_cancelled)
-        ):
-            # If jobs are configured to raise exceptions, propagate immediately
-            if isinstance(result, Exception) and self.raise_exceptions:
-                raise result
-            results.append(result)
-            pbar.update(1)
+        async with self._managed_futures(coroutines, max_workers) as futures:
+            async for result in futures:
+                if isinstance(result, Exception) and self.raise_exceptions:
+                    raise result
+                results.append(result)
+                pbar.update(1)
 
     async def aresults(self) -> t.List[t.Any]:
         """
