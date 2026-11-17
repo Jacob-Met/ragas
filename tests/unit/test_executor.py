@@ -4,6 +4,7 @@ import time
 import pytest
 
 from ragas.executor import Executor
+from ragas.run_config import RunConfig
 
 
 @pytest.mark.asyncio
@@ -150,3 +151,93 @@ def test_executor_batch_size_edge_cases():
     for i in range(3):
         executor.submit(echo, i)
     assert executor.results() == [0, 1, 2]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("batch_size", [None, 2])
+@pytest.mark.parametrize("max_workers", [1, 2])
+async def test_executor_failure_stops_sibling_jobs(batch_size, max_workers):
+    """A failed evaluation must not leave other jobs running after it raises."""
+    blocker = asyncio.Event()
+    escaped = asyncio.Event()
+
+    async def fail():
+        await asyncio.sleep(0)
+        raise ValueError("bad metric")
+
+    async def slow():
+        await blocker.wait()
+        escaped.set()
+
+    executor = Executor(
+        batch_size=batch_size,
+        raise_exceptions=True,
+        show_progress=False,
+        run_config=RunConfig(max_workers=max_workers),
+    )
+    executor.submit(fail)
+    executor.submit(slow)
+    with pytest.raises(ValueError, match="bad metric"):
+        await executor.aresults()
+
+    blocker.set()
+    await asyncio.sleep(0.02)
+    assert not escaped.is_set(), "a sibling completed after aresults() raised"
+
+
+@pytest.mark.asyncio
+async def test_cancelled_executor_stops_sibling_jobs():
+    """Cancelling the caller also stops the running evaluation jobs."""
+    started = asyncio.Event()
+    finished = asyncio.Event()
+    blocker = asyncio.Event()
+
+    async def slow():
+        started.set()
+        await blocker.wait()
+        finished.set()
+
+    executor = Executor(show_progress=False)
+    executor.submit(slow)
+    outer = asyncio.create_task(executor.aresults())
+    await asyncio.wait_for(started.wait(), timeout=0.5)
+    outer.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await outer
+    blocker.set()
+    await asyncio.sleep(0.02)
+    assert not finished.is_set(), "a cancelled executor left a job running"
+
+
+@pytest.mark.asyncio
+async def test_executor_failure_closes_unstarted_coroutines():
+    """Cancelling one-worker queues must close jobs that never started."""
+    import gc
+
+    before = asyncio.all_tasks()
+    started = []
+
+    async def fail():
+        raise ValueError("bad metric")
+
+    async def queued(index):
+        started.append(index)
+        await asyncio.sleep(1)
+
+    executor = Executor(
+        raise_exceptions=True,
+        show_progress=False,
+        run_config=RunConfig(max_workers=1),
+    )
+    executor.submit(fail)
+    for i in range(50):
+        executor.submit(queued, i)
+
+    with pytest.raises(ValueError, match="bad metric"):
+        await executor.aresults()
+    started_on_return = started.copy()
+    await asyncio.sleep(0.02)
+    gc.collect()
+
+    assert started == started_on_return
+    assert asyncio.all_tasks() - before == set()
