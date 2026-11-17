@@ -436,12 +436,15 @@ class EvaluationResult:
     run_id: t.Optional[UUID] = None
 
     def __post_init__(self):
-        # transform scores from list of dicts to dict of lists
-        self._scores_dict = (
-            {k: [d[k] for d in self.scores] for k in self.scores[0].keys()}
-            if self.scores
-            else {}
-        )
+        # The executor normally returns all metric keys for every row, but
+        # partial evaluations may have sparse scores. Discover every metric in
+        # first-seen order and keep score arrays aligned with the input rows.
+        # A missing metric is an unknown score, not zero (which would skew means).
+        metric_names = dict.fromkeys(key for row in self.scores for key in row)
+        self._scores_dict = {
+            metric: [row.get(metric, np.nan) for row in self.scores]
+            for metric in metric_names
+        }
 
         values = []
         self._repr_dict = {}
