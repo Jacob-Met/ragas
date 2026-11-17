@@ -224,3 +224,27 @@ def test_multiturn_sample_validate_user_input_valid_types():
     assert len(sample.user_input) == 2
     assert isinstance(sample.user_input[0], HumanMessage)
     assert isinstance(sample.user_input[1], AIMessage)
+
+
+def test_empty_evaluation_dataset_is_inspectable():
+    """An empty batch must not crash ordinary dataset inspection/serialization."""
+    dataset = EvaluationDataset.from_list([])
+    assert dataset.features() == []
+    assert dataset.to_list() == []
+    assert repr(dataset) == "EvaluationDataset(features=[], len=0)"
+    assert dataset.is_multi_turn() is False
+    assert dataset.to_pandas().empty
+    assert len(dataset.to_hf_dataset()) == 0
+
+    with pytest.raises(ValueError, match="empty dataset"):
+        dataset.get_sample_type()
+
+
+def test_empty_evaluation_result_is_inspectable():
+    """Callers can inspect a result with no scored rows."""
+    from ragas.dataset_schema import EvaluationResult
+
+    dataset = EvaluationDataset.from_list([])
+    result = EvaluationResult(scores=[], dataset=dataset)
+    assert repr(result) == "{}"
+    assert result.to_pandas().empty
