@@ -1,4 +1,5 @@
 import asyncio
+import threading
 import time
 
 import pytest
@@ -241,3 +242,120 @@ async def test_executor_failure_closes_unstarted_coroutines():
 
     assert started == started_on_return
     assert asyncio.all_tasks() - before == set()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("batch_size", [None, 2])
+@pytest.mark.parametrize("max_workers", [1, 2])
+@pytest.mark.parametrize("from_thread", [False, True])
+async def test_explicit_cancel_interrupts_blocked_evaluation(
+    batch_size, max_workers, from_thread
+):
+    """cancel() must wake aresults() even when no metric finishes."""
+    started = asyncio.Event()
+    run_count = 0
+    exit_count = 0
+
+    async def blocked_metric():
+        nonlocal run_count, exit_count
+        run_count += 1
+        started.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            exit_count += 1
+
+    executor = Executor(
+        show_progress=False,
+        batch_size=batch_size,
+        run_config=RunConfig(max_workers=max_workers),
+    )
+    executor.submit(blocked_metric)
+    executor.submit(blocked_metric)
+    result_task = asyncio.create_task(executor.aresults())
+    await asyncio.wait_for(started.wait(), timeout=0.5)
+
+    if from_thread:
+        await asyncio.to_thread(executor.cancel)
+    else:
+        executor.cancel()
+
+    assert await asyncio.wait_for(result_task, timeout=0.25) == []
+    assert run_count == exit_count
+
+
+@pytest.mark.asyncio
+async def test_explicit_cancel_returns_completed_partial_results():
+    """Cancellation retains finished scores but does not await blocked jobs."""
+    completed = asyncio.Event()
+    started = asyncio.Event()
+
+    async def quick_metric():
+        completed.set()
+        return 42
+
+    async def blocked_metric():
+        started.set()
+        await asyncio.Event().wait()
+
+    executor = Executor(show_progress=False, run_config=RunConfig(max_workers=2))
+    executor.submit(quick_metric)
+    executor.submit(blocked_metric)
+    result_task = asyncio.create_task(executor.aresults())
+    await asyncio.wait_for(completed.wait(), timeout=0.5)
+    await asyncio.wait_for(started.wait(), timeout=0.5)
+    await asyncio.sleep(0)
+    executor.cancel()
+
+    assert await asyncio.wait_for(result_task, timeout=0.25) == [42]
+
+
+@pytest.mark.asyncio
+async def test_cancel_before_evaluation_starts():
+    """An already-cancelled executor does not start newly submitted work."""
+    started = asyncio.Event()
+
+    async def blocked_metric():
+        started.set()
+        await asyncio.Event().wait()
+
+    executor = Executor(show_progress=False)
+    executor.cancel()
+    executor.submit(blocked_metric)
+    assert await asyncio.wait_for(executor.aresults(), timeout=0.5) == []
+    assert not started.is_set()
+
+
+def test_cancel_wakes_synchronous_results_from_another_thread():
+    """The public sync API must be interruptible from a different thread."""
+    started = threading.Event()
+    ended = threading.Event()
+    outcomes = []
+    errors = []
+
+    async def blocked_metric():
+        started.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            ended.set()
+
+    executor = Executor(show_progress=False)
+    executor.submit(blocked_metric)
+
+    def evaluate():
+        try:
+            outcomes.append(executor.results())
+        except BaseException as exc:
+            errors.append(exc)
+
+    worker = threading.Thread(target=evaluate, daemon=True)
+    worker.start()
+    assert started.wait(timeout=2)
+    executor.cancel()
+    worker.join(timeout=2)
+
+    assert not worker.is_alive(), "cancel() left the sync evaluation thread blocked"
+    assert not errors
+    assert outcomes == [[]]
+    assert ended.is_set()

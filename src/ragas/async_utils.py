@@ -92,6 +92,9 @@ def as_completed(
     def _iter_with_cancel():
         for future in ac_iter:
             if cancel_check():
+                # asyncio.as_completed yields a coroutine; a skipped one must be closed.
+                if asyncio.iscoroutine(future):
+                    future.close()
                 if cancel_pending:
                     for t in tasks:
                         if not t.done():
