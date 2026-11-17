@@ -248,3 +248,125 @@ def test_empty_evaluation_result_is_inspectable():
     result = EvaluationResult(scores=[], dataset=dataset)
     assert repr(result) == "{}"
     assert result.to_pandas().empty
+
+
+def test_sparse_evaluation_result_preserves_metric_union_and_row_alignment():
+    """Missing row/metric combinations must be NaN, not lost or KeyError."""
+    import math
+
+    from ragas.dataset_schema import EvaluationResult
+
+    dataset = EvaluationDataset(
+        samples=[
+            SingleTurnSample(user_input="first"),
+            SingleTurnSample(user_input="second"),
+            SingleTurnSample(user_input="third"),
+        ]
+    )
+    sparse_scores = [
+        {},
+        {"faithfulness": 0.25, "relevancy": 0.5},
+        {"faithfulness": 0.75},
+    ]
+    result = EvaluationResult(scores=sparse_scores, dataset=dataset)
+
+    assert list(result._scores_dict) == ["faithfulness", "relevancy"]
+    assert math.isnan(result["faithfulness"][0])
+    assert result["faithfulness"][1:] == [0.25, 0.75]
+    assert math.isnan(result["relevancy"][0])
+    assert result["relevancy"][1] == 0.5
+    assert math.isnan(result["relevancy"][2])
+    assert result._repr_dict == {"faithfulness": 0.5, "relevancy": 0.5}
+    assert "faithfulness" in repr(result)
+    rows = result.to_pandas()
+    assert rows["user_input"].tolist() == ["first", "second", "third"]
+    assert math.isnan(rows["faithfulness"].iloc[0])
+    assert rows["faithfulness"].iloc[1:].tolist() == [0.25, 0.75]
+    assert math.isnan(rows["relevancy"].iloc[2])
+    assert sparse_scores == [
+        {},
+        {"faithfulness": 0.25, "relevancy": 0.5},
+        {"faithfulness": 0.75},
+    ]
+
+
+def test_sparse_evaluation_result_keeps_all_metrics_and_all_nan_means():
+    """Order is first-seen across all score dictionaries, including late metrics."""
+    import math
+
+    from ragas.dataset_schema import EvaluationResult
+
+    dataset = EvaluationDataset(
+        samples=[SingleTurnSample(user_input=str(i)) for i in range(4)]
+    )
+    result = EvaluationResult(
+        scores=[
+            {"accuracy": 1.0},
+            {},
+            {"safety": float("nan"), "accuracy": 0.0},
+            {"uncertainty": float("nan"), "safety": 0.75},
+        ],
+        dataset=dataset,
+        binary_columns=["safety"],
+    )
+    assert list(result._scores_dict) == ["accuracy", "safety", "uncertainty"]
+    assert result["accuracy"][0] == 1.0
+    assert math.isnan(result["accuracy"][1])
+    assert result["accuracy"][2] == 0.0
+    assert math.isnan(result["accuracy"][3])
+    assert math.isnan(result["safety"][0])
+    assert result["safety"][3] == 0.75
+    assert math.isnan(result._repr_dict["uncertainty"])
+    assert result._repr_dict["accuracy"] == 0.5
+    assert result._repr_dict["safety"] == 0.75
+    assert list(result.to_pandas()["uncertainty"].isna()) == [True, True, True, True]
+
+
+def test_evaluation_result_all_empty_score_rows_remains_inspectable():
+    """A nonempty dataset with no metric names should have no metric columns."""
+    from ragas.dataset_schema import EvaluationResult
+
+    dataset = EvaluationDataset(
+        samples=[SingleTurnSample(user_input=str(i)) for i in range(2)]
+    )
+    result = EvaluationResult(scores=[{}, {}], dataset=dataset)
+    assert repr(result) == "{}"
+    assert result._scores_dict == {}
+    assert result.to_pandas()["user_input"].tolist() == ["0", "1"]
+
+
+def test_sparse_evaluation_result_randomized_metric_masks():
+    """Across changing row masks, pandas and aggregation agree on every score."""
+    import math
+    import random
+
+    from ragas.dataset_schema import EvaluationResult
+
+    rng = random.Random(7719)
+    metric_names = ["faithfulness", "relevancy", "precision", "recall"]
+    for _ in range(80):
+        row_count = rng.randrange(1, 19)
+        rows = [
+            {name: rng.random() for name in metric_names if rng.random() < 0.4}
+            for _ in range(row_count)
+        ]
+        dataset = EvaluationDataset(
+            samples=[SingleTurnSample(user_input=str(i)) for i in range(row_count)]
+        )
+        result = EvaluationResult(scores=rows, dataset=dataset)
+        frame = result.to_pandas()
+        expected_order = list(dict.fromkeys(k for row in rows for k in row))
+        assert list(result._scores_dict) == expected_order
+
+        for metric in expected_order:
+            series = result[metric]
+            assert len(series) == row_count
+            for i, row in enumerate(rows):
+                if metric in row:
+                    assert series[i] == row[metric]
+                    assert frame[metric].iloc[i] == row[metric]
+                else:
+                    assert math.isnan(series[i])
+                    assert math.isnan(frame[metric].iloc[i])
+            known = [row[metric] for row in rows if metric in row]
+            assert math.isclose(result._repr_dict[metric], sum(known) / len(known))
