@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import typing as t
 import warnings
 from uuid import UUID
@@ -30,7 +31,6 @@ from ragas.executor import Executor
 from ragas.integrations.helicone import helicone_config
 from ragas.llms import llm_factory
 from ragas.llms.base import BaseRagasLLM, InstructorBaseRagasLLM, LangchainLLMWrapper
-from ragas.metrics._answer_correctness import AnswerCorrectness
 from ragas.metrics._aspect_critic import AspectCritic
 from ragas.metrics.base import (
     Metric,
@@ -111,7 +111,13 @@ async def aevaluate(
     )
 
     column_map = column_map or {}
-    callbacks = callbacks or []
+    # Each run adds its own tracer and may modify callback tags/metadata.
+    # Never leave these handlers attached to a caller's reusable callbacks.
+    callbacks = (
+        callbacks.copy()
+        if isinstance(callbacks, BaseCallbackManager)
+        else list(callbacks or [])
+    )
     run_config = run_config or RunConfig()
 
     if helicone_config.is_enabled:
@@ -154,6 +160,10 @@ async def aevaluate(
         validate_required_columns(dataset, metrics)
         validate_supported_metrics(dataset, metrics)
 
+    # A metric can be used by overlapping evaluations or a deferred executor.
+    # Bind the run-specific models to separate instances, not the caller's metric.
+    metrics = [copy.copy(metric) for metric in metrics]
+
     # set the llm and embeddings
     if isinstance(llm, LangchainLLM):
         llm = LangchainLLMWrapper(llm, run_config=run_config)
@@ -162,12 +172,8 @@ async def aevaluate(
 
     # init llms and embeddings
     binary_metrics = []
-    llm_changed: t.List[int] = []
-    embeddings_changed: t.List[int] = []
-    answer_correctness_is_set = -1
-
-    # loop through the metrics and perform initializations
-    for i, metric in enumerate(metrics):
+    # Initialize the private per-evaluation metric instances.
+    for metric in metrics:
         # set llm and embeddings if not set
         if isinstance(metric, AspectCritic):
             binary_metrics.append(metric.name)
@@ -178,7 +184,6 @@ async def aevaluate(
                 client = OpenAI()
                 llm = llm_factory("gpt-4o-mini", client=client)
             metric.llm = t.cast(t.Optional[BaseRagasLLM], llm)
-            llm_changed.append(i)
         if isinstance(metric, MetricWithEmbeddings) and metric.embeddings is None:
             if embeddings is None:
                 # Infer embedding provider from LLM if available
@@ -191,10 +196,6 @@ async def aevaluate(
                     provider=inferred_provider, client=embedding_client
                 )
             metric.embeddings = embeddings
-            embeddings_changed.append(i)
-        if isinstance(metric, AnswerCorrectness):
-            if metric.answer_similarity is None:
-                answer_correctness_is_set = i
 
         # init all the models
         metric.init(run_config)
@@ -327,16 +328,6 @@ async def aevaluate(
         if not evaluation_group_cm.ended:
             evaluation_rm.on_chain_end({"scores": result.scores})
     finally:
-        # reset llms and embeddings if changed
-        for i in llm_changed:
-            t.cast(MetricWithLLM, metrics[i]).llm = None
-        for i in embeddings_changed:
-            t.cast(MetricWithEmbeddings, metrics[i]).embeddings = None
-        if answer_correctness_is_set != -1:
-            t.cast(
-                AnswerCorrectness, metrics[answer_correctness_is_set]
-            ).answer_similarity = None
-
         # flush the analytics batcher
         from ragas._analytics import _analytics_batcher
 
