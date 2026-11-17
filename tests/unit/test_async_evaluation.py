@@ -215,3 +215,31 @@ class TestAsyncIntegration:
                                 # We expect other exceptions due to mocking, but not RuntimeError
                                 assert "event loop" not in str(e).lower()
                                 assert "nest_asyncio" not in str(e).lower()
+
+
+@pytest.mark.asyncio
+async def test_empty_input_dataset_rejected_with_actionable_error():
+    """An evaluation with zero rows must not throw IndexError or use an LLM."""
+    from datasets import Dataset
+
+    from ragas.dataset_schema import EvaluationDataset
+    from ragas.evaluation import aevaluate
+    from ragas.metrics._string import StringPresence
+
+    for dataset in (EvaluationDataset.from_list([]), Dataset.from_list([])):
+        with pytest.raises(ValueError, match="empty dataset"):
+            await aevaluate(dataset, metrics=[StringPresence()], show_progress=False)
+
+
+def test_empty_dataset_sync_evaluation_has_actionable_error():
+    from ragas.dataset_schema import EvaluationDataset
+    from ragas.evaluation import evaluate
+    from ragas.metrics._string import StringPresence
+
+    with pytest.raises(ValueError, match="empty dataset"):
+        evaluate(
+            EvaluationDataset.from_list([]),
+            metrics=[StringPresence()],
+            show_progress=False,
+            allow_nest_asyncio=False,
+        )
