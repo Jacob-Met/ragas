@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import _thread
 import asyncio
 import logging
 import threading
@@ -54,10 +55,24 @@ class Executor:
     pbar: t.Optional[tqdm] = None
     _jobs_processed: int = field(default=0, repr=False)
     _cancel_event: threading.Event = field(default_factory=threading.Event, repr=False)
+    _active_runners: t.List[t.Tuple[asyncio.AbstractEventLoop, asyncio.Task]] = field(
+        default_factory=list, init=False, repr=False
+    )
+    _active_lock: _thread.LockType = field(
+        default_factory=threading.Lock, init=False, repr=False
+    )
 
     def cancel(self) -> None:
-        """Cancel the execution of all jobs."""
-        self._cancel_event.set()
+        """Cancel ongoing evaluations, including ones waiting for a slow job."""
+        with self._active_lock:
+            self._cancel_event.set()
+            runners = tuple(self._active_runners)
+        for loop, task in runners:
+            try:
+                loop.call_soon_threadsafe(task.cancel)
+            except RuntimeError:
+                if not loop.is_closed():
+                    raise
 
     def is_cancelled(self) -> bool:
         """Check if the execution has been cancelled."""
@@ -154,6 +169,14 @@ class Executor:
         """
         tasks: t.List[asyncio.Task] = []
         futures = None
+        loop = asyncio.get_running_loop()
+        runner = asyncio.current_task()
+        if runner is not None:
+            with self._active_lock:
+                self._active_runners.append((loop, runner))
+                already_cancelled = self._cancel_event.is_set()
+            if already_cancelled:
+                loop.call_soon(runner.cancel)
         try:
             futures = process_futures(
                 as_completed(
@@ -165,6 +188,9 @@ class Executor:
             )
             yield futures
         finally:
+            if runner is not None:
+                with self._active_lock:
+                    self._active_runners.remove((loop, runner))
             if futures is not None:
                 await futures.aclose()
             for task in tasks:
@@ -200,12 +226,19 @@ class Executor:
                     afunc(*args, **kwargs) for afunc, args, kwargs, _ in batch
                 ]
 
-                async with self._managed_futures(coroutines, max_workers) as futures:
-                    async for result in futures:
-                        if isinstance(result, Exception) and self.raise_exceptions:
-                            raise result
-                        results.append(result)
-                        batch_pbar.update(1)
+                try:
+                    async with self._managed_futures(
+                        coroutines, max_workers
+                    ) as futures:
+                        async for result in futures:
+                            if isinstance(result, Exception) and self.raise_exceptions:
+                                raise result
+                            results.append(result)
+                            batch_pbar.update(1)
+                except asyncio.CancelledError:
+                    if not self.is_cancelled():
+                        raise
+                    break
                 # Update overall progress bar for all futures in this batch
                 overall_pbar.update(len(batch))
 
@@ -213,12 +246,16 @@ class Executor:
         """Helper function to process coroutines and update the progress bar."""
         coroutines = [afunc(*args, **kwargs) for afunc, args, kwargs, _ in jobs]
 
-        async with self._managed_futures(coroutines, max_workers) as futures:
-            async for result in futures:
-                if isinstance(result, Exception) and self.raise_exceptions:
-                    raise result
-                results.append(result)
-                pbar.update(1)
+        try:
+            async with self._managed_futures(coroutines, max_workers) as futures:
+                async for result in futures:
+                    if isinstance(result, Exception) and self.raise_exceptions:
+                        raise result
+                    results.append(result)
+                    pbar.update(1)
+        except asyncio.CancelledError:
+            if not self.is_cancelled():
+                raise
 
     async def aresults(self) -> t.List[t.Any]:
         """
