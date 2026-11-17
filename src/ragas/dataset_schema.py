@@ -217,6 +217,8 @@ class RagasDataset(ABC, t.Generic[Sample]):
 
     def get_sample_type(self) -> t.Type[Sample]:
         """Returns the type of the samples in the dataset."""
+        if not self.samples:
+            raise ValueError("Cannot determine sample type of an empty dataset")
         return type(self.samples[0])
 
     def to_hf_dataset(self) -> HFDataset:
@@ -254,7 +256,7 @@ class RagasDataset(ABC, t.Generic[Sample]):
 
     def features(self):
         """Returns the features of the samples."""
-        return self.samples[0].get_features()
+        return self.samples[0].get_features() if self.samples else []
 
     @classmethod
     def from_dict(cls: t.Type[T], mapping: t.Dict) -> T:
@@ -372,12 +374,12 @@ class EvaluationDataset(RagasDataset[SingleTurnSampleOrMultiTurnSample]):
             raise TypeError("Index must be int or slice")
 
     def is_multi_turn(self) -> bool:
-        return self.get_sample_type() == MultiTurnSample
+        return bool(self.samples) and self.get_sample_type() == MultiTurnSample
 
     def to_list(self) -> t.List[t.Dict]:
         rows = [sample.to_dict() for sample in self.samples]
 
-        if self.get_sample_type() == MultiTurnSample:
+        if rows and self.get_sample_type() == MultiTurnSample:
             for sample in rows:
                 for item in sample["user_input"]:
                     if not isinstance(item["content"], str):
@@ -435,9 +437,11 @@ class EvaluationResult:
 
     def __post_init__(self):
         # transform scores from list of dicts to dict of lists
-        self._scores_dict = {
-            k: [d[k] for d in self.scores] for k in self.scores[0].keys()
-        }
+        self._scores_dict = (
+            {k: [d[k] for d in self.scores] for k in self.scores[0].keys()}
+            if self.scores
+            else {}
+        )
 
         values = []
         self._repr_dict = {}

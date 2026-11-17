@@ -122,6 +122,10 @@ async def aevaluate(
 
     if dataset is None:
         raise ValueError("Provide dataset!")
+    if len(dataset) == 0:
+        raise ValueError(
+            "Cannot evaluate an empty dataset; provide at least one sample."
+        )
 
     # Check metrics are correct type
     if not isinstance(metrics, (type(None), list)):
